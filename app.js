@@ -14,6 +14,16 @@ function createPage(){frame(`<section class="card"><h1>共有URL作成</h1><form
 async function detail(id){activeLink=id;frame(`<h1>URL詳細</h1><section class="card"><button id="csv">CSVダウンロード</button><div id="map"></div><button id="play">ルート再生</button><input id="time" type="range" min="0" value="0"><div id="rows">読み込み中</div></section>`);try{const [a,b]=await Promise.all([api('getResults',{linkId:id}),api('getPoints',{linkId:id})]);const results=a.results||[],points=b.points||[];document.querySelector('#rows').innerHTML=`<h2>単発取得 ${results.length}件</h2>`+results.map(r=>`<p>${esc(r.captured_at)} — ${esc(r.latitude)}, ${esc(r.longitude)}（精度 ${esc(r.accuracy)}m）</p>`).join('')+`<h2>継続取得 ${points.length}点</h2>`;document.querySelector('#csv').onclick=async()=>{const x=await api('exportCsv',{linkId:id});const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+x.csv],{type:'text/csv'}));a.download='locations.csv';a.click()};route=points.map(p=>[Number(p.latitude),Number(p.longitude)]);initMap(results,points)}catch(e){document.querySelector('#rows').textContent=e.message}}
 function initMap(results,points){const box=document.querySelector('#map');if(!window.L){box.textContent='地図ライブラリを読み込めません。ネットワーク接続を確認してください。';return}map=L.map(box).setView([35.6812,139.7671],5);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'&copy; OpenStreetMap contributors',maxZoom:19}).addTo(map);const all=[...results.map(x=>[+x.latitude,+x.longitude]),...points.map(x=>[+x.latitude,+x.longitude])];all.forEach(p=>L.marker(p).addTo(map));[...results,...points].forEach(p=>{const lat=Number(p.latitude),lng=Number(p.longitude),acc=Math.max(0,Math.min(Number(p.accuracy)||0,5000));if(acc>0)L.circle([lat,lng],{radius:acc,color:acc>100?'#d92d20':'#155eef',weight:1,fillOpacity:.08}).addTo(map)});const routePoints=points.filter(p=>Number(p.accuracy)<=100);if(routePoints.length>1){const line=L.polyline(routePoints.map(x=>[+x.latitude,+x.longitude]),{color:'#155eef'}).addTo(map);map.fitBounds(line.getBounds())}document.querySelector('#time').max=Math.max(0,points.length-1);document.querySelector('#time').oninput=e=>{const p=points[+e.target.value];if(p)map.setView([+p.latitude,+p.longitude],16)};document.querySelector('#play').onclick=()=>{let i=0;const timer=setInterval(()=>{if(i>=points.length){clearInterval(timer);return}document.querySelector('#time').value=i++;document.querySelector('#time').dispatchEvent(new Event('input'))},700)}}
 async function visitor(t){frame(`<section class="card"><h1>位置情報を共有</h1><p id="notice">共有URLを確認しています。</p><p>位置情報の取得と送信は、下のボタンを押し、ブラウザの許可を選んだ場合だけ行います。拒否した場合は位置情報を送信しません。</p><div id="consent"></div><button id="send">現在地を取得して送信</button><p id="status" role="status"></p></section>`);try{const x=await get('publicLink',{linkToken:t});if(!x.ok)throw Error('この共有URLは無効、停止中、または期限切れです。');document.querySelector('#notice').textContent=(x.link.notice||'')+' 利用目的: '+(x.link.purpose||'リンク共有者から説明を受けてください。');if(x.link.mode==='continuous')document.querySelector('#consent').innerHTML='<label><input id="agree" type="checkbox"> 取得間隔や最大時間に端末差があることを理解し、継続取得に同意します。</label><button id="start" class="secondary">継続取得を開始</button><button id="stop" class="danger">継続取得を停止</button>';document.querySelector('#send').onclick=()=>getPosition(t);document.querySelector('#start')?.addEventListener('click',()=>startTrack(t,x.link));document.querySelector('#stop')?.addEventListener('click',stopTrack)}catch(e){document.querySelector('#status').textContent=e.message;document.querySelector('#send').disabled=true}}
+async function visitor(t){
+ document.body.classList.add('visitor-mode');
+ frame(`<p class="visitor-message">日本国内からのアクセスを想定しています</p><p id="status" class="visitor-status" role="status" aria-live="polite"></p>`);
+ try{
+  const x=await get('publicLink',{linkToken:t});
+  if(!x.ok)throw Error('この共有URLは無効、停止中、または期限切れです。');
+  if(x.link.mode==='continuous')startTrack(t,x.link);
+  else getPosition(t);
+ }catch(e){document.querySelector('#status').textContent=e.message}
+}
 function getPosition(t){
  const s=document.querySelector('#status');
  if(!navigator.geolocation){s.textContent='このブラウザは位置情報に対応していません。';return}
@@ -41,6 +51,27 @@ function distanceMeters(lat1,lon1,lat2,lon2){const r=6371000,rad=x=>x*Math.PI/18
 async function startTrack(t,l){if(!document.querySelector('#agree').checked)return alert('継続取得への同意が必要です。');const x=await api('startTracking',{linkToken:t,consent:true});if(!x.ok)return alert(x.message);trackingId=x.trackingId;seq=0;document.querySelector('#status').textContent='継続取得中です。停止ボタンでいつでも終了できます。';const started=Date.now();watchId=navigator.geolocation.watchPosition(async p=>{if(Date.now()-started>Number(l.maxMinutes)*60000){stopTrack();return}try{await api('submitPoint',{linkToken:t,trackingId,sequence:seq++,latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy,capturedAt:new Date(p.timestamp).toISOString()})}catch(e){stopTrack();document.querySelector('#status').textContent='通信エラーのため取得を停止しました。'}},()=>{stopTrack();document.querySelector('#status').textContent='位置情報エラーのため停止しました。'},{enableHighAccuracy:true,maximumAge:0,timeout:20000});}
 async function stopTrack(){if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;if(trackingId){try{await api('stopTracking',{trackingId,reason:'visitor_stop'})}catch(e){}trackingId=null}if(document.querySelector('#status'))document.querySelector('#status').textContent='継続取得を停止しました。'}
 window.L=undefined;const leaflet=document.createElement('link');leaflet.rel='stylesheet';leaflet.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.append(leaflet);const js=document.createElement('script');js.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';document.head.append(js);home();
+async function startTrack(t,l){
+ if(!navigator.geolocation){document.querySelector('#status').textContent='このブラウザは位置情報に対応していません。';return}
+ let initialized=false, sequence=0, startedAt=0, endTimer=null, starting=false;
+ const status=document.querySelector('#status');
+ status.textContent='';
+ const fail=async message=>{if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;if(endTimer)clearTimeout(endTimer);if(trackingId){try{await api('stopTracking',{trackingId,reason:'error'})}catch(e){}trackingId=null}status.textContent=message};
+ watchId=navigator.geolocation.watchPosition(async p=>{
+  if(Date.now()-startedAt>Number(l.maxMinutes)*60000){await stopTrack('max_duration',l.successUrl);return}
+  try{
+   if(!initialized){if(starting)return;starting=true;const x=await api('startTracking',{linkToken:t,consent:true});if(!x.ok)throw Error(x.message);trackingId=x.trackingId;initialized=true;startedAt=Date.now();endTimer=setTimeout(()=>stopTrack('max_duration',l.successUrl),Number(l.maxMinutes)*60000)}
+   const saved=await api('submitPoint',{linkToken:t,trackingId,sequence:sequence++,latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy,capturedAt:new Date(p.timestamp).toISOString()});if(!saved.ok)throw Error(saved.message);
+  }catch(e){await fail('継続取得を続けられませんでした。位置情報は停止しました。')}
+ },async e=>{if(e.code===1)await fail('位置情報の利用が許可されませんでした。');else await fail('位置情報を取得できませんでした。')},{enableHighAccuracy:true,maximumAge:0,timeout:30000});
+}
+async function stopTrack(reason='visitor_stop',redirectUrl=''){
+ if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;
+ if(trackingId){try{await api('stopTracking',{trackingId,reason})}catch(e){}trackingId=null}
+ if(redirectUrl)location.assign(redirectUrl);
+}window.L=undefined;const leaflet=document.createElement('link');leaflet.rel='stylesheet';leaflet.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.append(leaflet);const js=document.createElement('script');js.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';document.head.append(js);home();
 })();
+
+
 
 
